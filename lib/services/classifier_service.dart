@@ -1,53 +1,68 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 class ClassifierService {
   late Interpreter _interpreter;
-  final List<String> _labels = [
-    'Абиссинская', 
-    'Американский бобтейл',
-    'Американский кёрл',
-    'Американская короткошерстная',
-    'Бенгальская',
-    'Бирманская',
-    'Бомбейская',
-    'Британская короткошерстная',
-    'Египетский мау',
-    'Экзотическая короткошерстная',
-    'Мейн-кун',
-    'Мэнкс',
-    'Норвежская лесная',
-    'Не удалось найти кошку',
-    'Персинская',
-    'Рэгдолл',
-    'Русская голубая',
-    'Шотландская вислоухая',
-    'Сиамская',
-    'Сфинкс',
-    'Турецкая ангора'
-    // добавьте все ваши породы
-  ];
+  late List<String> _labels;
 
   Future<void> init() async {
     try {
+      // 1. Загрузка модели
       _interpreter = await Interpreter.fromAsset('assets/model.tflite');
+      
+      // 2. Загрузка меток из JSON
+      await _loadLabels();
+      
       if (kDebugMode) {
         print('Модель успешно загружена');
+        print('Количество классов: ${_labels.length}');
       }
     } catch (e) {
       if (kDebugMode) {
-        print('Ошибка загрузки модели: $e');
+        print('Ошибка инициализации: $e');
       }
+      rethrow;
+    }
+  }
+
+  Future<void> _loadLabels() async {
+    try {
+      final jsonString = await rootBundle.loadString('assets/class_indices.json');
+      final Map<String, dynamic> classIndices = json.decode(jsonString);
+      
+      // Сортируем метки по индексам
+      _labels = List.filled(classIndices.length, '');
+      classIndices.forEach((label, index) {
+        _labels[index] = label;
+      });
+      
+      if (kDebugMode) {
+        print('Загружены метки классов: $_labels');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('Ошибка загрузки меток: $e');
+      }
+      _labels = []; // Фолбек на случай ошибки
+      rethrow;
     }
   }
 
   Future<Map<String, double>> classifyImage(File imageFile) async {
+    if (_interpreter == null || _labels.isEmpty) {
+      throw Exception('Классификатор не инициализирован');
+    }
+
     try {
       // 1. Преобразование изображения
       final imageBytes = await imageFile.readAsBytes();
-      final image = img.decodeImage(imageBytes)!;
+      final image = img.decodeImage(imageBytes);
+      if (image == null) throw Exception('Не удалось декодировать изображение');
+
       final resizedImage = img.copyResize(image, width: 224, height: 224);
       final imageMatrix = _imageToMatrix(resizedImage);
 
@@ -55,30 +70,27 @@ class ClassifierService {
       final output = List<double>.filled(_labels.length, 0.0);
       final outputBuffer = [output];
 
-      // 3. Запуск модели с явным приведением типов
+      // 3. Запуск модели
       _interpreter.run([imageMatrix], outputBuffer);
 
       // 4. Обработка результатов
-      final results = _processOutput(outputBuffer[0]);
-
-      return results;
+      return _processOutput(outputBuffer[0]);
     } catch (e) {
       if (kDebugMode) {
         print('Ошибка классификации: $e');
       }
-      return {};
+      rethrow;
     }
   }
 
   List<List<List<double>>> _imageToMatrix(img.Image image) {
-    final resized = img.copyResize(image, width: 224, height: 224);
     return List.generate(224, (y) {
       return List.generate(224, (x) {
-        final pixel = resized.getPixel(x, y);
+        final pixel = image.getPixel(x, y);
         return [
-          (pixel.r - 127.5) / 127.5,   // Красный канал
-          (pixel.g - 127.5) / 127.5,   // Зеленый канал
-          (pixel.b - 127.5) / 127.5    // Синий канал
+          pixel.r / 255.0,  // Нормализация [0,1]
+          pixel.g / 255.0,
+          pixel.b / 255.0
         ];
       });
     });
@@ -93,6 +105,6 @@ class ClassifierService {
   }
 
   void dispose() {
-    _interpreter.close();
+    _interpreter?.close();
   }
 }
